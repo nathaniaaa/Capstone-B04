@@ -6,6 +6,10 @@
 		{
 			"name": "esp32_node_master",
 			"path": "SEMESTER 6/capstone/esp32_node_master"
+		},
+		{
+			"name": "esp32_node_master",
+			"path": "../../esp32_node_master"
 		}
 	],
 	"settings": {}

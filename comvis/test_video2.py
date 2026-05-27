@@ -107,6 +107,7 @@ while cap.isOpened():
     results = model.track(
         frame,
         persist = True,
+        tracker = "bytetrack.yaml",
         classes = [0, 1, 2, 3, 5, 7],  # person, bicycle, car, motorcycle, bus, truck
         conf    = 0.25,
         iou     = 0.5,

@@ -207,6 +207,15 @@ while cap.isOpened():
                      else max(ngebut_counter - 1, 0)
     status_jalan   = "NGEBUT" if ngebut_counter >= NGEBUT_DEBOUNCE_FRAMES else "AMAN"
 
+    if status_jalan == "NGEBUT":
+        durasi_timer = "HOLD"
+    elif kepadatan < 2:
+        durasi_timer = 9
+    elif kepadatan <= 3:
+        durasi_timer = 7
+    else:
+        durasi_timer = 5
+
     # ---- Cleanup memori (jangan biarkan dict membengkak) ----
     if results[0].boxes.id is not None:
         active_ids = set(results[0].boxes.id.int().cpu().tolist())
@@ -222,7 +231,8 @@ while cap.isOpened():
     if mqtt_connected:
         client.publish(MQTT_TOPIC, json.dumps({
             "kepadatan": kepadatan,
-            "status"   : status_jalan
+            "status"   : status_jalan,
+            "timer"    : durasi_timer
         }))
 
     # =================== 8. UI ===================
@@ -241,6 +251,11 @@ while cap.isOpened():
     status_color = (0, 0, 255) if status_jalan == "NGEBUT" else (0, 255, 0)
     cv2.putText(frame, f"Status: {status_jalan}", (20, 70),
                 cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 3)
+    
+    # UI Timer Dinamis
+    timer_color = (0, 165, 255) # Warna orange untuk timer
+    cv2.putText(frame, f"Timer: {durasi_timer}", (20, 110),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, timer_color, 3)
 
     # Info kalibrasi
     cv2.putText(frame,

@@ -2,6 +2,7 @@ import cv2
 import json
 import paho.mqtt.client as mqtt
 from ultralytics import YOLO
+import threading
 
 # ===============================================================
 # SMART SAFE WALKING PATH — Final Edge CV Module v6
@@ -12,11 +13,31 @@ from ultralytics import YOLO
 # =================== 1. KONFIGURASI MQTT LOCAL EDGE ===================
 MQTT_BROKER = "10.236.155.191"
 MQTT_PORT   = 1883
-MQTT_TOPIC  = "jalan/status"
+MQTT_TOPIC_PUB = "jalan/status"
+MQTT_TOPIC_SUB = "jalan/trigger"
+
+# Variabel bantuan untuk menjembatani data dari thread MQTT ke loop utama video
+trigger_lock = threading.Lock()
+trigger_dari_esp = False
+
+# Fungsi callback saat Laptop menerima data dari ESP32
+def on_message(client, userdata, msg):
+    global trigger_dari_esp
+    try:
+        payload = msg.payload.decode('utf-8')
+        if payload == "ADA_ORANG":
+            print("\n[MQTT RECEIVED] Sinyal PIR dari ESP32 Terdeteksi!")
+            with trigger_lock:        # ← TAMBAH INI
+                trigger_dari_esp = True
+    except Exception as e:
+        print(f"[MQTT ERROR] {e}")
 
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+client.on_message = on_message # Pasang fungsi callback dengerin pesan
+
 try:
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
+    client.subscribe(MQTT_TOPIC_SUB) # Laptop resmi subscribe topik trigger ESP32
     client.loop_start()
     mqtt_connected = True
     print("[MQTT] Local Edge Broker terhubung!")
@@ -200,6 +221,20 @@ while cap.isOpened():
     # =========================================================
     # 7.5 SIMULASI COUNTDOWN VIRTUAL
     # =========================================================
+    with trigger_lock:
+        lokal_trigger = trigger_dari_esp
+        if lokal_trigger:
+            trigger_dari_esp = False  # reset di dalam lock
+
+    if lokal_trigger and not is_crossing:
+        if target_timer == "HOLD":
+            print("[WARNING] Jalanan NGEBUT! Trigger ESP32 diabaikan.")
+        else:
+            is_crossing = True
+            countdown_val = target_timer
+            last_tick_time = current_time_s
+            print(f"[AUTO-TRIGGER] Countdown: {countdown_val}s")
+
     if is_crossing:
         # Kurangi angka setiap 1 detik waktu video
         if current_time_s - last_tick_time >= 1.0:
@@ -223,7 +258,8 @@ while cap.isOpened():
 
     # =================== 8. PUBLISH MQTT ===================
     if mqtt_connected:
-        client.publish(MQTT_TOPIC, json.dumps({
+        # Menyelaraskan key JSON menjadi "target_timer" agar klop dengan main.cpp ESP32
+        client.publish(MQTT_TOPIC_PUB, json.dumps({
             "kepadatan": kepadatan,
             "status"   : status_jalan,
             "timer"    : target_timer   # Kirim target timer ke ESP32

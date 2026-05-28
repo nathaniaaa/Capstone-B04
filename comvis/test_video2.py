@@ -4,10 +4,9 @@ import paho.mqtt.client as mqtt
 from ultralytics import YOLO
 
 # ===============================================================
-# SMART SAFE WALKING PATH — Final Edge CV Module v4
+# SMART SAFE WALKING PATH — Final Edge CV Module v6
 # Metode kecepatan : Virtual Line State-Crossing
-# Fix v2→v3       : "spawn below line" edge case
-# Fix v3→v4       : Arah crossing dibalik (bottom→top, sesuai bird-eye kamera)
+# Arsitektur       : Centralized Intelligence + UI Countdown Simulasi
 # ===============================================================
 
 # =================== 1. KONFIGURASI MQTT LOCAL EDGE ===================
@@ -43,39 +42,25 @@ if video_fps <= 0:
 print(f"[INFO] Video FPS: {video_fps:.1f}")
 
 # =================== 4. PARAMETER KECEPATAN ===================
-# ----------------------------------------------------------------
-# Kalibrasi JARAK_ANTAR_GARIS_METER:
-#   Lihat video → hitung berapa marka jalan (tiap strip = 5m) yang
-#   ada di antara LINE_A dan LINE_B. Kalikan dengan panjang strip.
-#   Atau ukur dari referensi objek fisik yang diketahui dimensinya.
-# ----------------------------------------------------------------
-JARAK_ANTAR_GARIS_METER = 7.5  # ← SESUAIKAN dengan video kamu
-SPEED_THRESHOLD_KMH     = 40    # ← batas "ngebut" (zona 40 km/h)
+JARAK_ANTAR_GARIS_METER = 7.5  
+SPEED_THRESHOLD_KMH     = 40    
 
-# Posisi garis virtual di frame ROI (rasio tinggi frame)
-# Kendaraan bergerak BOTTOM → TOP (bird-eye, kamera di atas zebra cross)
-# LINE_A = garis bawah (START — kendaraan melewati ini duluan)
-# LINE_B = garis atas  (STOP  — kendaraan melewati ini setelahnya)
-LINE_A_RATIO = 0.75  # garis bawah = START
-LINE_B_RATIO = 0.40  # garis atas  = STOP
+LINE_A_RATIO = 0.75  
+LINE_B_RATIO = 0.40  
 
 # =================== 5. STRUKTUR DATA ===================
-# track_data[id] = {
-#   "prev_y"     : float  — posisi Y frame sebelumnya
-#   "crossed_A"  : bool   — sudah melewati LINE_A?
-#   "crossed_B"  : bool   — sudah melewati LINE_B?
-#   "time_A"     : float|None
-#   "time_B"     : float|None
-#   "valid_entry": bool   — apakah kendaraan spawn DI ATAS LINE_A?
-# }
 track_data  = {}
-speed_cache = {}  # {track_id: speed_kmh} — persisten antar frame
+speed_cache = {}  
 
-# Debounce: status NGEBUT hanya aktif setelah N frame beruntun
+# Debounce NGEBUT
 NGEBUT_DEBOUNCE_FRAMES = 8
 ngebut_counter         = 0
+frame_count            = 0
 
-frame_count = 0
+# Variabel Simulasi Countdown CV
+is_crossing       = False
+countdown_val     = 0
+last_tick_time    = 0.0
 
 # =================== 6. LOOP UTAMA ===================
 while cap.isOpened():
@@ -86,12 +71,15 @@ while cap.isOpened():
         speed_cache.clear()
         ngebut_counter = 0
         frame_count    = 0
+        is_crossing    = False
         continue
 
     frame_count += 1
+    # Gunakan waktu video agar countdown sinkron meskipun video ngelag
     current_time_s = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+    
     if frame_count % 2 == 0:
-        continue  # frame skipping — baca tapi tidak proses
+        continue  
 
     # ---- ROI ----
     h_orig, w_orig = original_frame.shape[:2]
@@ -108,7 +96,7 @@ while cap.isOpened():
         frame,
         persist = True,
         tracker = "bytetrack.yaml",
-        classes = [0, 1, 2, 3, 5, 7],  # person, bicycle, car, motorcycle, bus, truck
+        classes = [0, 1, 2, 3, 5, 7], 
         conf    = 0.25,
         iou     = 0.5,
         imgsz   = 640,
@@ -127,13 +115,10 @@ while cap.isOpened():
             cx, cy = float(box[0]), float(box[1])
             bw, bh = float(box[2]), float(box[3])
             
-            # --- REVISI KRUSIAL: GROUND PLANE TRACKING ---
-            # Menggunakan titik roda menyentuh aspal, bukan atap mobil
+            # Ground Plane Tracking (Contact Patch)
             bottom_y = cy + (bh / 2)
 
-            # ---- Inisialisasi track baru ----
             if track_id not in track_data:
-                # Toleransi 100 piksel dari Garis A (menghindari telat deteksi YOLO)
                 TOLERANSI_SPAWN = 100
                 spawned_below_a = bottom_y > (line_a_y - TOLERANSI_SPAWN)
                 
@@ -146,13 +131,10 @@ while cap.isOpened():
                     "valid_entry": spawned_below_a,
                 }
                 speed_cache[track_id] = 0
-                if not spawned_below_a:
-                    print(f"[WARN] ID:{track_id} muncul di atas LINE_A (y={bottom_y:.0f} < {line_a_y}) → tidak dihitung")
 
             td     = track_data[track_id]
             prev_y = td["prev_y"]
 
-            # ---- Hanya proses crossing kalau valid_entry = True ----
             if td["valid_entry"]:
                 # State-crossing LINE_A
                 if not td["crossed_A"] and prev_y > line_a_y >= bottom_y:
@@ -169,24 +151,20 @@ while cap.isOpened():
                         speed_ms  = JARAK_ANTAR_GARIS_METER / delta_t
                         speed_kmh = int(speed_ms * 3.6)
                         speed_cache[track_id] = speed_kmh
-                        print(f"[SPEED] ID:{track_id} → {speed_kmh} km/h (Δt={delta_t:.2f}s)")
 
                     td["crossed_A"] = False
                     td["crossed_B"] = False
                     td["time_A"]    = None
                     td["time_B"]    = None
 
-            # Update memori posisi roda untuk frame berikutnya
             td["prev_y"] = bottom_y
 
-            # ---- Render ----
             kecepatan_kmh = speed_cache.get(track_id, 0)
             is_ngebut     = kecepatan_kmh > SPEED_THRESHOLD_KMH
             if is_ngebut:
                 ada_ngebut = True
 
             color = (0, 0, 255) if is_ngebut else (0, 255, 0)
-            # abu-abu untuk kendaraan yang invalid entry (tidak bisa dihitung)
             if not td["valid_entry"]:
                 color = (150, 150, 150)
 
@@ -207,16 +185,32 @@ while cap.isOpened():
                      else max(ngebut_counter - 1, 0)
     status_jalan   = "NGEBUT" if ngebut_counter >= NGEBUT_DEBOUNCE_FRAMES else "AMAN"
 
+    # =========================================================
+    # 7. LOGIKA KEPUTUSAN TARGET TIMER
+    # =========================================================
     if status_jalan == "NGEBUT":
-        durasi_timer = "HOLD"
+        target_timer = "HOLD"
     elif kepadatan < 2:
-        durasi_timer = 9
+        target_timer = 9
     elif kepadatan <= 3:
-        durasi_timer = 7
+        target_timer = 7
     else:
-        durasi_timer = 5
+        target_timer = 5
 
-    # ---- Cleanup memori (jangan biarkan dict membengkak) ----
+    # =========================================================
+    # 7.5 SIMULASI COUNTDOWN VIRTUAL
+    # =========================================================
+    if is_crossing:
+        # Kurangi angka setiap 1 detik waktu video
+        if current_time_s - last_tick_time >= 1.0:
+            countdown_val -= 1
+            last_tick_time = current_time_s
+            
+        # Selesai nyeberang
+        if countdown_val <= 0:
+            is_crossing = False
+
+    # ---- Cleanup memori ----
     if results[0].boxes.id is not None:
         active_ids = set(results[0].boxes.id.int().cpu().tolist())
     else:
@@ -227,16 +221,15 @@ while cap.isOpened():
             track_data.pop(tid, None)
             speed_cache.pop(tid, None)
 
-    # =================== 7. PUBLISH MQTT ===================
+    # =================== 8. PUBLISH MQTT ===================
     if mqtt_connected:
         client.publish(MQTT_TOPIC, json.dumps({
             "kepadatan": kepadatan,
             "status"   : status_jalan,
-            "timer"    : durasi_timer
+            "timer"    : target_timer   # Kirim target timer ke ESP32
         }))
 
-    # =================== 8. UI ===================
-    # Garis virtual — LINE_A bawah (start), LINE_B atas (stop)
+    # =================== 9. UI ===================
     cv2.line(frame, (0, line_a_y), (w_roi, line_a_y), (255, 120, 0), 1)
     cv2.putText(frame, "LINE A (start)", (5, line_a_y - 5),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 120, 0), 1)
@@ -245,28 +238,48 @@ while cap.isOpened():
     cv2.putText(frame, "LINE B (stop)", (5, line_b_y - 5),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 210, 210), 1)
 
-    # Status utama
+    # UI Kendaraan & Status
     cv2.putText(frame, f"Kendaraan: {kepadatan}", (20, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    
     status_color = (0, 0, 255) if status_jalan == "NGEBUT" else (0, 255, 0)
     cv2.putText(frame, f"Status: {status_jalan}", (20, 70),
                 cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 3)
-    
-    # UI Timer Dinamis
-    timer_color = (0, 165, 255) # Warna orange untuk timer
-    cv2.putText(frame, f"Timer: {durasi_timer}", (20, 110),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, timer_color, 3)
 
-    # Info kalibrasi
+    # UI Simulasi Timer
+    if is_crossing:
+        # Layar saat sedang nyeberang (Countdown Jalan)
+        cv2.putText(frame, f"NYEBERANG: {countdown_val}s", (int(w_roi/2) - 150, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 4)
+    else:
+        # Layar Standby
+        timer_color = (0, 165, 255) # Orange
+        cv2.putText(frame, f"Target Timer: {target_timer}", (20, 110),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, timer_color, 3)
+        cv2.putText(frame, "[TEKAN SPASI UTK NYEBERANG]", (20, 140),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+
     cv2.putText(frame,
                 f"Jarak garis: {JARAK_ANTAR_GARIS_METER}m | Threshold: {SPEED_THRESHOLD_KMH}km/h",
                 (10, h_roi - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (180, 180, 180), 1)
 
-    cv2.imshow("Smart Safe Walking Path - Local Video Analysis", frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    cv2.imshow("Smart Safe Walking Path - Edge Analytics", frame)
+    
+    # Deteksi Keyboard
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord('q'):
         break
+    elif key == ord(' '):  # Tombol SPASI ditekan
+        if not is_crossing:
+            if target_timer == "HOLD":
+                print("[WARNING] Jalanan NGEBUT! Belum boleh nyeberang.")
+            else:
+                is_crossing = True
+                countdown_val = target_timer
+                last_tick_time = current_time_s
+                print(f"[SIMULASI] Menyeberang dengan jatah waktu {countdown_val} detik.")
 
-# =================== 9. CLEANUP ===================
+# =================== 10. CLEANUP ===================
 cap.release()
 cv2.destroyAllWindows()
 if mqtt_connected:
